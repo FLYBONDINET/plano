@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>EZE Plataforma OPS</title>
+  <meta name="theme-color" content="#FFD100"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="css/style.css"/>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-title">EZE Plataforma OPS</div>
+    <div class="brand-sub" id="sessionInfo"></div>
+  </div>
+  <div class="actions">
+    <button id="btnLogin" class="btn">👤 Sesión</button>
+    <button id="btnMode" class="btn">🛠 Editor</button>
+    <button id="btnAddPlane" class="btn primary">✈ Avión</button>
+    <button id="btnTimeline" class="btn">🕓 Timeline</button>
+    <button id="btnLayers" class="btn">🗺 Capas</button>
+    <button id="btnAudit" class="btn">🧾 Auditoría</button>
+    <button id="btnSync" class="btn">🔄 Sync</button>
+    <button id="btnExport" class="btn">Exportar</button>
+    <button id="btnImport" class="btn">Importar</button>
+    <input id="fileImport" type="file" hidden/>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="sidebar">
+    <div class="card">
+      <div class="row between">
+        <div>
+          <div class="kicker">Modo</div>
+          <div id="modeLabel" class="mode">OPERATIVO</div>
+        </div>
+        <div class="pill" id="syncState">LOCAL</div>
+      </div>
+      <div class="hint">
+        Operativo: asignar aviones, mover, estados<br>
+        Editor: crear/editar stands (Admin/Supervisor)
+      </div>
+      <div class="divider"></div>
+      <div class="kicker">Reglas</div>
+      <div class="hint">
+        • 1 stand = 1 avión (bloqueo duro)<br>
+        • Override sólo Supervisor/Admin<br>
+        • Todo queda auditado
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <div class="kicker">Posiciones</div>
+        <input id="standSearch" class="mini" placeholder="Buscar (14B)">
+      </div>
+      <div id="standList" class="list"></div>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <div class="kicker">Aviones</div>
+        <input id="planeSearch" class="mini" placeholder="Buscar (LV-)">
+      </div>
+      <div id="planeList" class="list"></div>
+    </div>
+  </aside>
+
+  <section class="mapwrap">
+    <div id="map"></div>
+    <div class="toast" id="toast" hidden></div>
+  </section>
+</main>
+
+<div class="backdrop" id="backdrop" hidden></div>
+<div class="modal" id="modal" hidden>
+  <div class="modal-head">
+    <b id="modalTitle"></b>
+    <button id="btnClose" class="btn icon">✕</button>
+  </div>
+  <div class="modal-body" id="modalBody"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
