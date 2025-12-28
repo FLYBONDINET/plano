@@ -3,88 +3,89 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>EZE Plataforma OPS</title>
-  <meta name="theme-color" content="#FFD100"/>
-  <link rel="manifest" href="manifest.json"/>
+  <title>EZE Plataforma Operacional</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <link rel="stylesheet" href="css/style.css"/>
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">
-    <div class="brand-title">EZE Plataforma OPS</div>
-    <div class="brand-sub" id="sessionInfo"></div>
-  </div>
-  <div class="actions">
-    <button id="btnLogin" class="btn">👤 Sesión</button>
-    <button id="btnMode" class="btn">🛠 Editor</button>
-    <button id="btnAddPlane" class="btn primary">✈ Avión</button>
-    <button id="btnTimeline" class="btn">🕓 Timeline</button>
-    <button id="btnLayers" class="btn">🗺 Capas</button>
-    <button id="btnAudit" class="btn">🧾 Auditoría</button>
-    <button id="btnSync" class="btn">🔄 Sync</button>
-    <button id="btnExport" class="btn">Exportar</button>
-    <button id="btnImport" class="btn">Importar</button>
-    <input id="fileImport" type="file" hidden/>
-  </div>
-</header>
-
-<main class="layout">
   <aside class="sidebar">
-    <div class="card">
-      <div class="row between">
-        <div>
-          <div class="kicker">Modo</div>
-          <div id="modeLabel" class="mode">OPERATIVO</div>
-        </div>
-        <div class="pill" id="syncState">LOCAL</div>
-      </div>
-      <div class="hint">
-        Operativo: asignar aviones, mover, estados<br>
-        Editor: crear/editar stands (Admin/Supervisor)
-      </div>
-      <div class="divider"></div>
-      <div class="kicker">Reglas</div>
-      <div class="hint">
-        • 1 stand = 1 avión (bloqueo duro)<br>
-        • Override sólo Supervisor/Admin<br>
-        • Todo queda auditado
+    <div class="brand">
+      <div class="logo">✈</div>
+      <div>
+        <div class="title">Plataforma EZE</div>
+        <div id="modePill" class="pill">Modo Operativo</div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="row between">
-        <div class="kicker">Posiciones</div>
-        <input id="standSearch" class="mini" placeholder="Buscar (14B)">
-      </div>
-      <div id="standList" class="list"></div>
-    </div>
+    <!-- OPERATIVO -->
+    <section id="opsPanel" class="panel">
+      <button id="btnSync" class="btn primary">🔄 Sincronizar desde Excel</button>
+      <button id="btnEnterEditor" class="btn">🔒 Entrar a modo editor</button>
 
-    <div class="card">
-      <div class="row between">
-        <div class="kicker">Aviones</div>
-        <input id="planeSearch" class="mini" placeholder="Buscar (LV-)">
-      </div>
+      <div class="subhead">Aviones</div>
       <div id="planeList" class="list"></div>
-    </div>
+    </section>
+
+    <!-- EDITOR -->
+    <section id="editorPanel" class="panel" hidden>
+      <div class="subhead">Modo Editor</div>
+      <div class="pill warn">Editor activo</div>
+
+      <div class="stack">
+        <button id="btnLoadPos" class="btn primary">📍 Cargar posiciones</button>
+        <button id="btnEditAirport" class="btn primary">🛣️ Editar aeropuerto</button>
+        <div class="row">
+          <button id="btnUndo" class="btn">↩️ Deshacer</button>
+          <button id="btnExitEditor" class="btn danger">Salir</button>
+        </div>
+      </div>
+
+      <div class="subhead">Posiciones</div>
+      <div id="standList" class="list"></div>
+
+      <div class="subhead">Herramientas (aeropuerto)</div>
+      <div class="toolbox">
+        <div class="row gap">
+          <label class="field">
+            <span>Color</span>
+            <input id="lnColor" type="color" value="#ffffff">
+          </label>
+          <label class="field">
+            <span>Grosor</span>
+            <input id="lnWeight" type="number" min="1" max="8" value="2">
+          </label>
+        </div>
+        <div class="row gap">
+          <button id="btnDrawLine" class="btn">✏️ Dibujar</button>
+          <button id="btnEraseLine" class="btn">🧽 Borrar</button>
+        </div>
+        <div class="hint">
+          • Dibujar: click agrega puntos, doble click termina.<br>
+          • Borrar: click sobre una línea para eliminarla.
+        </div>
+      </div>
+    </section>
   </aside>
 
-  <section class="mapwrap">
-    <div id="map"></div>
-    <div class="toast" id="toast" hidden></div>
-  </section>
-</main>
+  <div id="editorOverlay" hidden></div>
+  <main id="map"></main>
 
-<div class="backdrop" id="backdrop" hidden></div>
-<div class="modal" id="modal" hidden>
-  <div class="modal-head">
-    <b id="modalTitle"></b>
-    <button id="btnClose" class="btn icon">✕</button>
+  <!-- MODAL -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="modalTitle">Título</h3>
+        <button id="modalX" class="iconbtn" title="Cerrar">✕</button>
+      </div>
+      <div id="modalBody"></div>
+      <div class="modal-actions">
+        <button id="modalCancel" class="btn">Cancelar</button>
+        <button id="modalOk" class="btn primary">Aceptar</button>
+      </div>
+    </div>
   </div>
-  <div class="modal-body" id="modalBody"></div>
-</div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="js/app.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
