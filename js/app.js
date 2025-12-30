@@ -1,593 +1,770 @@
 
-/**
- * Plataforma EZE - Operativo + Editor protegido
- * - Modo operativo por defecto (lee plano + muestra aviones)
- * - Editor con contraseña 12345678
- * - Cargar posiciones con modal (nombre + HDG slider con flecha/preview)
- * - Editar aeropuerto (líneas con color + grosor, dibujar/borrar, undo)
- * - Mapa fijo (sin pan/zoom nativo), el usuario se mueve arrastrando manual
- * - Aviones: icono naranja, tamaño por tipo, tarjeta de matrícula al costado (no gira)
- * - Sync Excel: pegar URL de Apps Script que devuelve JSON (matricula, posicion, vuelo, origen, tipo opcional)
- */
+/************************
+ * CONFIG
+ ************************/
+const PASSWORD = "12345678";
+const API_URL = "https://script.google.com/macros/s/AKfycbxxK76o03FV8J_83wRmrDiySOEsIBdVuErPTD7s1-8QRY2_aT4qFJOfrbE88GIfAZzF2g/exec";
 
-// ====== CONFIG ======
-const EDITOR_PASSWORD = "12345678";
-const TYPE_SIZE = { E190: 32, B737: 44, A320: 48 };
-const PLANE_COLOR = "#ff7a00";
-const STAND_VECTOR_COLOR = "#FFD100";
-// Pegá tu Apps Script acá cuando lo tengas (debe devolver JSON array)
-const SCRIPT_URL = "PEGAR_URL_APPS_SCRIPT_AQUI";
+/************************
+ * MAPA
+ ************************/
+const map = L.map("map", { zoomControl: true, attributionControl: false })
+  .setView([-34.8222, -58.5358], 16);
 
-// ====== STATE ======
-let editorMode = false;
-let actionMode = null; // 'loadPos' | 'airportDraw' | 'airportErase' | null
-let tempPreview = { arrow: null, plane: null };
+L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19 }
+).addTo(map);
 
-let stands = JSON.parse(localStorage.getItem("stands") || "[]"); // {id,name,lat,lng,hdg,typeHint?}
-let lines  = JSON.parse(localStorage.getItem("lines")  || "[]"); // {id,points,color,weight}
-let planes = JSON.parse(localStorage.getItem("planes") || "[]"); // {id,reg,type,state,standId,flight,origin}
-
-let undoStack = []; // snapshots {stands,lines}
-
-// ====== MAP ======
-const map = L.map("map", { zoomControl: false, attributionControl: false }).setView([-34.8222, -58.5358], 16);
-L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}").addTo(map);
-
-// lock native interaction
-map.dragging.disable();
-map.scrollWheelZoom.disable();
-map.doubleClickZoom.disable();
-map.boxZoom.disable();
-map.keyboard.disable();
-map.touchZoom.disable();
-
-// manual drag (you move over the airport)
-let dragging = false;
-let start = null;
-map.getContainer().addEventListener("mousedown", (e) => {
-  dragging = true;
-  start = { x: e.clientX, y: e.clientY };
-});
-window.addEventListener("mousemove", (e) => {
-  if (!dragging) return;
-  map.panBy([start.x - e.clientX, start.y - e.clientY], { animate: false });
-  start = { x: e.clientX, y: e.clientY };
-});
-window.addEventListener("mouseup", () => (dragging = false));
-
-// ====== DOM ======
-const modePill = document.getElementById("modePill");
-const opsPanel = document.getElementById("opsPanel");
-const editorPanel = document.getElementById("editorPanel");
-const editorOverlay = document.getElementById("editorOverlay");
-
-const btnEnterEditor = document.getElementById("btnEnterEditor");
+/************************
+ * UI
+ ************************/
+const btnEditor = document.getElementById("btnEditor");
+const btnRefresh = document.getElementById("btnRefresh");
+const editorPills = document.getElementById("editorPills");
+const btnAddPos = document.getElementById("btnAddPos");
+const btnAirport = document.getElementById("btnAirport");
 const btnExitEditor = document.getElementById("btnExitEditor");
-const btnLoadPos = document.getElementById("btnLoadPos");
-const btnEditAirport = document.getElementById("btnEditAirport");
+
+const sidebar = document.getElementById("sidebar");
+const posList = document.getElementById("posList");
+const airportTools = document.getElementById("airportTools");
+const lineColor = document.getElementById("lineColor");
+const lineWidth = document.getElementById("lineWidth");
+const btnFinishLine = document.getElementById("btnFinishLine");
 const btnUndo = document.getElementById("btnUndo");
-const btnSync = document.getElementById("btnSync");
+const btnClearLines = document.getElementById("btnClearLines");
 
-const btnDrawLine = document.getElementById("btnDrawLine");
-const btnEraseLine = document.getElementById("btnEraseLine");
-const lnColor = document.getElementById("lnColor");
-const lnWeight = document.getElementById("lnWeight");
+const flightBox = document.getElementById("flightBox");
+const flightList = document.getElementById("flightList");
+document.getElementById("closeFlightBox").onclick = () => (flightBox.style.display = "none");
 
-const planeList = document.getElementById("planeList");
-const standList = document.getElementById("standList");
+// Password modal
+const pwModal = document.getElementById("pwModal");
+const pwInput = document.getElementById("pwInput");
+document.getElementById("pwCancel").onclick = () => hidePw();
+document.getElementById("pwOk").onclick = () => tryEnterEditor();
 
-const modal = document.getElementById("modal");
-const modalTitle = document.getElementById("modalTitle");
-const modalBody = document.getElementById("modalBody");
-const modalOk = document.getElementById("modalOk");
-const modalCancel = document.getElementById("modalCancel");
-const modalX = document.getElementById("modalX");
+// Position modal
+const posModal = document.getElementById("posModal");
+const posModalTitle = document.getElementById("posModalTitle");
+const posName = document.getElementById("posName");
+const posHdg = document.getElementById("posHdg");
+const posColor = document.getElementById("posColor");
+const labelPos = document.getElementById("labelPos");
+const hdgVal = document.getElementById("hdgVal");
+const posDelete = document.getElementById("posDelete");
+document.getElementById("posCancel").onclick = () => closePosModal();
+document.getElementById("posSave").onclick = () => savePosFromModal();
+posDelete.onclick = () => deleteEditingPos();
 
-// ====== HELPERS ======
-function save() {
-  localStorage.setItem("stands", JSON.stringify(stands));
-  localStorage.setItem("lines", JSON.stringify(lines));
-  localStorage.setItem("planes", JSON.stringify(planes));
-}
-function snapshot() {
-  // deep-ish copy via JSON for simplicity
-  undoStack.push(JSON.stringify({ stands, lines }));
-  if (undoStack.length > 50) undoStack.shift();
-}
-function undo() {
-  const prev = undoStack.pop();
-  if (!prev) return;
-  const data = JSON.parse(prev);
-  stands = data.stands;
-  lines = data.lines;
-  save();
-  renderAll();
-}
-function openModal(title, html, onOk) {
-  modalTitle.textContent = title;
-  modalBody.innerHTML = html;
-  modal.hidden = false;
+/************************
+ * ESTADO
+ ************************/
+let isEditor = false;
+let editorMode = null; // "pos" | "apt" | null
 
-  const close = () => {
-    modal.hidden = true;
-    clearTempPreview();
-  };
+// posiciones
+let positions = loadJSON("eze_positions", []); // [{id,name,lat,lng,hdg,color,labelPos}]
+let lines = loadJSON("eze_airport_lines", []); // [{points:[[lat,lng],...], color, width}]
 
-  modalOk.onclick = () => {
-    onOk?.();
-    close();
-  };
-  modalCancel.onclick = close;
-  modalX.onclick = close;
-}
-function clearTempPreview() {
-  if (tempPreview.arrow) map.removeLayer(tempPreview.arrow);
-  if (tempPreview.plane) map.removeLayer(tempPreview.plane);
-  tempPreview.arrow = null;
-  tempPreview.plane = null;
-}
-function clampDeg(v) {
-  const n = Number(v) || 0;
-  return ((n % 360) + 360) % 360;
-}
-function planeSVG(size, color) {
-  // simple airplane silhouette; color via currentColor
-  return `<svg width="${size}" height="${size}" viewBox="0 0 64 64" style="color:${color}">
-    <path d="M31 4c3 0 4 2 4 4v15l19 10c1 1 1 3 0 4l-2 2c-1 1-2 1-3 0L35 33v10l6 5c1 1 1 2 0 3l-1 2c-1 1-2 1-3 0l-7-4-7 4c-1 1-2 1-3 0l-1-2c-1-1-1-2 0-3l6-5V33L15 43c-1 1-2 1-3 0l-2-2c-1-1-1-3 0-4l19-10V8c0-2 1-4 2-4z" fill="currentColor"/>
-  </svg>`;
-}
-function standVectorEnd(lat, lng, hdg, len = 0.00009) {
-  const rad = (hdg - 90) * Math.PI / 180;
-  return [lat + len * Math.sin(rad), lng + len * Math.cos(rad)];
-}
-function centerOn(lat, lng) {
-  map.panTo([lat, lng], { animate: false });
-}
-function findStandByName(name) {
-  const key = String(name || "").trim().toUpperCase();
-  return stands.find(s => String(s.name).trim().toUpperCase() === key);
-}
-function findPlaneByReg(reg) {
-  const key = String(reg || "").trim().toUpperCase();
-  return planes.find(p => String(p.reg).trim().toUpperCase() === key);
-}
-function planeCardHtml(p, stand) {
-  const size = TYPE_SIZE[p.type] || 44;
-  const rot = clampDeg(stand.hdg);
-  return `
-    <div style="transform:rotate(${rot}deg)">${planeSVG(size, PLANE_COLOR)}</div>
-    <div class="planeCard">
-      <b>${escapeHtml(p.reg)}</b>
-      <small>${escapeHtml(p.type || "B737")} · ${escapeHtml(stand.name)}</small>
-      ${p.flight ? `<small>${escapeHtml(p.flight)} · ${escapeHtml(p.origin||"")}</small>` : ""}
-    </div>
-  `;
-}
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#39;");
+// capas (posiciones + líneas)
+let standLayersById = new Map(); // id -> {group, circle, line, labelMarker}
+let airportLineLayers = [];      // L.Polyline[]
+let currentAptLine = null;       // L.Polyline in progress
+
+// preview al crear/editar posición
+let pendingLatLng = null; // L.LatLng
+let previewLine = null;
+
+// aviones
+let aircraftLayers = []; // layers to remove
+let aircraftObjs = [];   // {posId, marker, labelMarker, labelPos}
+
+// edición de posición
+let editingPosId = null;
+
+
+function distMeters(a,b){
+  const R=6371000;
+  const dLat=(b.lat-a.lat)*Math.PI/180;
+  const dLng=(b.lng-a.lng)*Math.PI/180;
+  const la1=a.lat*Math.PI/180;
+  const la2=b.lat*Math.PI/180;
+  const x=Math.sin(dLat/2)**2+Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
 }
 
-// ====== RENDER ======
-function renderPlaneList() {
-  planeList.innerHTML = "";
-  const sorted = [...planes].sort((a,b) => (a.reg||"").localeCompare(b.reg||""));
-  for (const p of sorted) {
-    const stand = stands.find(s => s.id === p.standId);
-    const div = document.createElement("div");
-    div.className = "item";
-    div.innerHTML = `
-      <div class="row">
-        <div><b>${escapeHtml(p.reg)}</b></div>
-        <div class="kbd">${stand ? escapeHtml(stand.name) : "—"}</div>
-      </div>
-      <small>${escapeHtml(p.type || "B737")}${p.flight ? " · "+escapeHtml(p.flight) : ""}</small>
-    `;
-    div.onclick = () => { if (stand) centerOn(stand.lat, stand.lng); };
-    planeList.appendChild(div);
+/************************
+ * UTIL
+ ************************/
+function normPosName(x){
+  return String(x || "").trim().toUpperCase();
+}
+function uid(){
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+function loadJSON(key, fallback){
+  try{
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  }catch{
+    return fallback;
+  }
+}
+function saveJSON(key, value){
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+/************************
+ * MODO EDITOR (PASSWORD)
+ ************************/
+btnEditor.onclick = () => {
+  pwInput.value = "";
+  pwModal.classList.remove("hidden");
+  pwInput.focus();
+};
+
+function hidePw(){
+  pwModal.classList.add("hidden");
+}
+
+function tryEnterEditor(){
+  const pw = pwInput.value || "";
+  if(pw !== PASSWORD){
+    alert("Contraseña incorrecta");
+    return;
+  }
+  hidePw();
+  enterEditor();
+}
+
+function enterEditor(){
+  isEditor = true;
+  editorMode = null;
+
+  editorPills.hidden = false;
+  btnEditor.disabled = true;
+
+  sidebar.hidden = false;
+  airportTools.hidden = true;
+
+  // botones del editor visibles
+  btnAddPos.disabled = false;
+  btnAirport.disabled = false;
+  btnExitEditor.disabled = false;
+}
+
+btnExitEditor.onclick = () => {
+  isEditor = false;
+  editorMode = null;
+  btnEditor.disabled = false;
+  editorPills.hidden = true;
+  sidebar.hidden = true;
+  airportTools.hidden = true;
+
+  closePosModal();
+  clearPreview();
+
+  // al salir del editor: refrescar aviones (para que aparezcan si ya hay match)
+  loadFlightsAndPlaceAircraft();
+};
+
+btnAddPos.onclick = () => {
+  if(!isEditor) return;
+  editorMode = (editorMode === "pos") ? null : "pos";
+  airportTools.hidden = true;
+};
+
+btnAirport.onclick = () => {
+  if(!isEditor) return;
+  editorMode = (editorMode === "apt") ? null : "apt";
+  airportTools.hidden = (editorMode !== "apt");
+  // cerrar línea en progreso si salgo del modo
+  if(editorMode !== "apt") finishAirportLine();
+};
+
+/************************
+ * POSICIONES (DIBUJO)
+ ************************/
+function computeEnd(lat, lng, hdg, dist=0.00009){
+  const r = (hdg - 90) * Math.PI/180;
+  return [lat + dist*Math.sin(r), lng + dist*Math.cos(r)];
+}
+
+function labelOffsetFor(labelPosValue){
+  // offset en píxeles relativo al punto del stand
+  switch(labelPosValue){
+    case "front": return [18, -22];
+    case "back":  return [-38, 18];
+    case "left":  return [-60, -6];
+    case "right": return [30, -6];
+    default: return [18, -22];
   }
 }
 
-function renderStandList() {
-  standList.innerHTML = "";
-  const sorted = [...stands].sort((a,b)=> (a.name||"").localeCompare(b.name||""));
-  for (const s of sorted) {
-    const div = document.createElement("div");
-    div.className = "item";
-    div.innerHTML = `
-      <div class="row">
-        <div><b>${escapeHtml(s.name)}</b></div>
-        <div class="kbd">HDG ${clampDeg(s.hdg)}</div>
-      </div>
-      <small>Click para centrar · Slider para ajustar</small>
-      <div class="sep"></div>
-      <input data-stand="${s.id}" type="range" min="0" max="360" value="${clampDeg(s.hdg)}"/>
-      <div class="row" style="justify-content:space-between;margin-top:8px;gap:10px">
-        <button data-del="${s.id}" class="btn" style="padding:8px">🗑️ Eliminar</button>
-      </div>
-    `;
-    div.onclick = (ev) => {
-      // don't trigger center when interacting with controls
-      const t = ev.target;
-      if (t && (t.tagName === "INPUT" || t.dataset.del)) return;
-      centerOn(s.lat, s.lng);
-    };
-
-    const slider = div.querySelector("input[type=range]");
-    slider.oninput = () => {
-      if (!editorMode) return;
-      snapshot();
-      s.hdg = clampDeg(slider.value);
-      save();
-      renderAll();
-    };
-
-    const delBtn = div.querySelector("button[data-del]");
-    delBtn.onclick = (ev) => {
-      ev.stopPropagation();
-      if (!editorMode) return;
-      if (!confirm(`Eliminar posición ${s.name}?`)) return;
-      snapshot();
-      // remove planes assigned to this stand
-      planes = planes.filter(p => p.standId !== s.id);
-      stands = stands.filter(x => x.id !== s.id);
-      save();
-      renderAll();
-    };
-
-    standList.appendChild(div);
+function clearStands(){
+  for(const {group} of standLayersById.values()){
+    map.removeLayer(group);
   }
+  standLayersById.clear();
 }
 
-let layerGroup = L.layerGroup().addTo(map);
+function drawAllStands(){
+  clearStands();
 
-function renderMap() {
-  layerGroup.clearLayers();
+  for(const p of positions){
+    const group = L.layerGroup().addTo(map);
 
-  // lines
-  for (const l of lines) {
-    const pl = L.polyline(l.points, { color: l.color, weight: l.weight }).addTo(layerGroup);
-    // attach id for eraser lookup
-    pl._lineId = l.id;
-  }
-
-  // stands
-  for (const s of stands) {
-    const end = standVectorEnd(s.lat, s.lng, clampDeg(s.hdg));
-    L.circleMarker([s.lat, s.lng], { radius: 3, color: STAND_VECTOR_COLOR }).addTo(layerGroup);
-    L.polyline([[s.lat, s.lng], end], { color: STAND_VECTOR_COLOR, weight: 2 }).addTo(layerGroup);
-
-    // label a bit forward in heading direction
-    const lblEnd = standVectorEnd(s.lat, s.lng, clampDeg(s.hdg), 0.00011);
-    L.marker(lblEnd, {
-      icon: L.divIcon({ className: "", html: `<div class="standLabel">${escapeHtml(s.name)}</div>` })
-    }).addTo(layerGroup);
-  }
-
-  // planes
-  for (const p of planes) {
-    const stand = stands.find(s => s.id === p.standId);
-    if (!stand) continue;
-    L.marker([stand.lat, stand.lng], {
-      icon: L.divIcon({ className: "", html: planeCardHtml(p, stand) })
-    }).addTo(layerGroup);
-  }
-}
-
-function renderAll() {
-  renderMap();
-  renderPlaneList();
-  renderStandList();
-}
-
-// ====== MODES ======
-function setEditor(on) {
-  editorMode = on;
-  if (on) {
-    modePill.textContent = "Modo Editor";
-    modePill.classList.add("warn");
-    opsPanel.hidden = TrueFalse(false); // placeholder
-  }
-}
-
-// helper because older browsers
-function TrueFalse(v){ return !!v; }
-
-function enterEditor() {
-  const pwd = prompt("Contraseña modo editor");
-  if (pwd !== EDITOR_PASSWORD) return alert("Contraseña incorrecta");
-  editorMode = true;
-  actionMode = null;
-
-  editorOverlay.hidden = false;
-  opsPanel.hidden = true;
-  editorPanel.hidden = false;
-
-  modePill.textContent = "Modo Editor";
-  modePill.classList.add("warn");
-}
-
-function exitEditor() {
-  editorMode = false;
-  actionMode = null;
-  clearTempPreview();
-
-  editorOverlay.hidden = true;
-  opsPanel.hidden = false;
-  editorPanel.hidden = true;
-
-  modePill.textContent = "Modo Operativo";
-  modePill.classList.remove("warn");
-}
-
-// ====== EDITOR ACTIONS ======
-function startLoadPositions() {
-  if (!editorMode) return;
-  actionMode = "loadPos";
-  alert("Cargar posiciones: hacé click en el mapa para crear una posición.");
-}
-function startEditAirport() {
-  if (!editorMode) return;
-  actionMode = "airportDraw";
-  alert("Editar aeropuerto: usá Dibujar o Borrar en el panel lateral.");
-}
-function setAirportTool(tool) {
-  if (!editorMode) return;
-  actionMode = tool; // 'airportDraw' | 'airportErase'
-}
-
-// ====== POSITION MODAL with LIVE PREVIEW ======
-function showCreateStandModal(latlng) {
-  clearTempPreview();
-
-  openModal("Nueva posición", `
-    <div class="form">
-      <label>
-        <span>Nombre de la posición</span>
-        <input id="posName" type="text" placeholder="Ej: 14B, 18A, 2"/>
-      </label>
-      <label>
-        <span>Tipo (preview tamaño)</span>
-        <select id="posType">
-          <option value="E190">E190</option>
-          <option value="B737" selected>B737</option>
-          <option value="A320">A320</option>
-        </select>
-      </label>
-      <label>
-        <span>Heading (0–360)</span>
-        <input id="posHdg" type="range" min="0" max="360" value="0"/>
-        <div class="kbd">HDG: <span id="posHdgVal">0</span>°</div>
-      </label>
-      <div class="hint">Mientras movés el slider, se ve la flecha y el avión (preview).</div>
-    </div>
-  `, () => {
-    const name = document.getElementById("posName").value.trim();
-    const hdg = clampDeg(document.getElementById("posHdg").value);
-    const typeHint = document.getElementById("posType").value;
-
-    if (!name) return alert("Poné un nombre de posición (ej: 14B).");
-
-    snapshot();
-    stands.push({
-      id: String(Date.now()),
-      name,
-      lat: latlng.lat,
-      lng: latlng.lng,
-      hdg,
-      typeHint
-    });
-    save();
-    renderAll();
-  });
-
-  const hdgSlider = document.getElementById("posHdg");
-  const hdgVal = document.getElementById("posHdgVal");
-  const typeSel = document.getElementById("posType");
-
-  function updatePreview() {
-    clearTempPreview();
-    const hdg = clampDeg(hdgSlider.value);
-    hdgVal.textContent = String(hdg);
-
-    // arrow
-    const end = standVectorEnd(latlng.lat, latlng.lng, hdg, 0.00011);
-    tempPreview.arrow = L.polyline([[latlng.lat, latlng.lng], end], {
-      color: "#ffffff",
+    const circle = L.circleMarker([p.lat, p.lng], {
+      radius: 4,
+      color: p.color || "#FFD100",
       weight: 2,
-      dashArray: "5,5"
-    }).addTo(layerGroup);
+      fillOpacity: 1
+    }).addTo(group);
 
-    // ghost plane
-    const type = typeSel.value;
-    const size = TYPE_SIZE[type] || 44;
-    const html = `<div style="opacity:.55;transform:rotate(${hdg}deg)">${planeSVG(size, "#cccccc")}</div>`;
-    tempPreview.plane = L.marker([latlng.lat, latlng.lng], {
-      icon: L.divIcon({ className: "", html })
-    }).addTo(layerGroup);
+    const end = computeEnd(p.lat, p.lng, +p.hdg || 0);
+    const hdgLine = L.polyline([[p.lat, p.lng], end], {
+      color: p.color || "#FFD100",
+      weight: 3,
+      opacity: 0.95
+    }).addTo(group);
+
+    // nombre (stand) desplazado
+    const [ox, oy] = labelOffsetFor(p.labelPos || "front");
+    const labelLatLng = pointOffsetToLatLng([p.lat, p.lng], ox, oy);
+    const labelMarker = L.marker(labelLatLng, {
+      interactive: true,
+      icon: L.divIcon({
+        className: "stand-label",
+        html: `<span style="color:${p.color||"#FFD100"}">${escapeHtml(p.name)}</span>`
+      })
+    }).addTo(group);
+
+    // click para editar
+    const onEdit = () => {
+      if(!isEditor) return;
+      openEditPos(p.id);
+    };
+    circle.on("click", onEdit);
+    hdgLine.on("click", onEdit);
+    labelMarker.on("click", onEdit);
+
+    standLayersById.set(p.id, {group, circle, hdgLine, labelMarker});
   }
 
-  hdgSlider.oninput = updatePreview;
-  typeSel.onchange = updatePreview;
-  updatePreview();
+  // cuando se mueve el mapa, recalcular labels y aircraft labels
+  syncAllDynamicLabels();
 }
 
-// ====== AIRPORT DRAW/ERASE ======
-let drawing = false;
-let currentPts = [];
-let currentPreview = null;
+function escapeHtml(str){
+  return String(str || "")
+    .replaceAll("&","&amp;").replaceAll("<","&lt;")
+    .replaceAll(">","&gt;").replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
 
-function currentLineStyle() {
-  return {
-    color: lnColor.value || "#ffffff",
-    weight: Math.max(1, Math.min(8, parseInt(lnWeight.value || "2", 10)))
+function pointOffsetToLatLng(latlngArr, dx, dy){
+  const latlng = L.latLng(latlngArr[0], latlngArr[1]);
+  const pt = map.latLngToLayerPoint(latlng);
+  const pt2 = L.point(pt.x + dx, pt.y + dy);
+  return map.layerPointToLatLng(pt2);
+}
+
+function syncAllDynamicLabels(){
+  // stands
+  for(const p of positions){
+    const layer = standLayersById.get(p.id);
+    if(!layer) continue;
+    const [ox, oy] = labelOffsetFor(p.labelPos || "front");
+    const ll = pointOffsetToLatLng([p.lat, p.lng], ox, oy);
+    layer.labelMarker.setLatLng(ll);
+  }
+  // aircraft labels
+  for(const a of aircraftObjs){
+    const p = positions.find(x => x.id === a.posId);
+    if(!p) continue;
+    const [ox, oy] = aircraftLabelOffsetFor(a.labelPos || "right");
+    const ll = pointOffsetToLatLng([p.lat, p.lng], ox, oy);
+    a.labelMarker.setLatLng(ll);
+  }
+}
+
+map.on("zoomend moveend", syncAllDynamicLabels);
+
+/************************
+ * MODAL POSICIÓN + PREVIEW
+ ************************/
+function openNewPos(latlng){
+  editingPosId = null;
+  pendingLatLng = latlng;
+
+  posModalTitle.textContent = "Nueva posición";
+  posDelete.hidden = true;
+
+  posName.value = "";
+  posHdg.value = 0;
+  hdgVal.textContent = "0";
+  posColor.value = "#FFD100";
+  labelPos.value = "front";
+
+  posModal.classList.remove("hidden");
+  drawPreview();
+}
+
+function openEditPos(posId){
+  const p = positions.find(x => x.id === posId);
+  if(!p) return;
+
+  editingPosId = posId;
+  pendingLatLng = L.latLng(p.lat, p.lng);
+
+  posModalTitle.textContent = `Editar posición ${p.name}`;
+  posDelete.hidden = false;
+
+  posName.value = p.name;
+  posHdg.value = +p.hdg || 0;
+  hdgVal.textContent = String(+p.hdg || 0);
+  posColor.value = p.color || "#FFD100";
+  labelPos.value = p.labelPos || "front";
+
+  posModal.classList.remove("hidden");
+  drawPreview();
+}
+
+function closePosModal(){
+  posModal.classList.add("hidden");
+  clearPreview();
+}
+
+posHdg.oninput = () => {
+  hdgVal.textContent = String(posHdg.value);
+  drawPreview();
+};
+posColor.oninput = () => drawPreview();
+
+function drawPreview(){
+  clearPreview();
+  if(!pendingLatLng) return;
+  const end = computeEnd(pendingLatLng.lat, pendingLatLng.lng, +posHdg.value || 0);
+  previewLine = L.polyline([[pendingLatLng.lat, pendingLatLng.lng], end], {
+    color: posColor.value || "#FFD100",
+    weight: 3,
+    dashArray: "5,5",
+    opacity: 0.95
+  }).addTo(map);
+}
+
+function clearPreview(){
+  if(previewLine){
+    map.removeLayer(previewLine);
+    previewLine = null;
+  }
+}
+
+function savePosFromModal(){
+  const name = normPosName(posName.value);
+  if(!name){
+    alert("Nombre requerido");
+    return;
+  }
+  if(!pendingLatLng){
+    alert("Punto inválido");
+    return;
+  }
+
+  const payload = {
+    id: editingPosId || uid(),
+    name,
+    lat: pendingLatLng.lat,
+    lng: pendingLatLng.lng,
+    hdg: +posHdg.value || 0,
+    color: posColor.value || "#FFD100",
+    labelPos: labelPos.value || "front"
   };
+
+  // upsert
+  const idx = positions.findIndex(x => x.id === payload.id);
+  if(idx >= 0) positions[idx] = payload;
+  else positions.push(payload);
+
+  saveJSON("eze_positions", positions);
+  closePosModal();
+
+  drawAllStands();
+  renderPosSidebar();
+
+  // refrescar aviones si hay datos
+  loadFlightsAndPlaceAircraft();
 }
 
-function beginLine(latlng) {
-  drawing = true;
-  currentPts = [[latlng.lat, latlng.lng]];
-  if (currentPreview) layerGroup.removeLayer(currentPreview);
-  currentPreview = L.polyline(currentPts, currentLineStyle()).addTo(layerGroup);
+function deleteEditingPos(){
+  if(!editingPosId) return;
+  const p = positions.find(x => x.id === editingPosId);
+  if(!p) return;
+
+  if(!confirm(`Eliminar posición ${p.name}?`)) return;
+
+  positions = positions.filter(x => x.id !== editingPosId);
+  saveJSON("eze_positions", positions);
+
+  closePosModal();
+  drawAllStands();
+  renderPosSidebar();
+  loadFlightsAndPlaceAircraft();
 }
 
-function addPoint(latlng) {
-  currentPts.push([latlng.lat, latlng.lng]);
-  if (currentPreview) currentPreview.setLatLngs(currentPts);
-}
+/************************
+ * SIDEBAR POSICIONES (EDIT/DEL)
+ ************************/
+function renderPosSidebar(){
+  posList.innerHTML = "";
 
-function finishLine() {
-  if (!drawing) return;
-  drawing = false;
-  if (currentPreview) layerGroup.removeLayer(currentPreview);
-  currentPreview = null;
+  const sorted = [...positions].sort((a,b) => a.name.localeCompare(b.name));
+  for(const p of sorted){
+    const li = document.createElement("li");
+    li.className = "pos-item";
 
-  if (currentPts.length < 2) return;
+    const name = document.createElement("div");
+    name.className = "pos-name";
+    name.textContent = p.name;
 
-  snapshot();
-  const style = currentLineStyle();
-  lines.push({
-    id: String(Date.now() + Math.random()),
-    points: currentPts,
-    color: style.color,
-    weight: style.weight
-  });
-  currentPts = [];
-  save();
-  renderAll();
-}
+    const actions = document.createElement("div");
+    actions.className = "pos-actions";
 
-function eraseNearestLine(latlng) {
-  if (!lines.length) return;
-  // find closest polyline by distance to any vertex (simple & fast)
-  let best = { idx: -1, d: Infinity };
-  for (let i = 0; i < lines.length; i++) {
-    const pts = lines[i].points;
-    for (const [la, ln] of pts) {
-      const d = map.distance(latlng, L.latLng(la, ln));
-      if (d < best.d) best = { idx: i, d };
-    }
+    const bEdit = document.createElement("button");
+    bEdit.className = "icon-btn";
+    bEdit.title = "Editar";
+    bEdit.textContent = "✏️";
+    bEdit.onclick = () => openEditPos(p.id);
+
+    const bDel = document.createElement("button");
+    bDel.className = "icon-btn";
+    bDel.title = "Eliminar";
+    bDel.textContent = "🗑️";
+    bDel.onclick = () => {
+      editingPosId = p.id;
+      deleteEditingPos();
+    };
+
+    actions.appendChild(bEdit);
+    actions.appendChild(bDel);
+
+    li.appendChild(name);
+    li.appendChild(actions);
+
+    // click en el item centra el mapa
+    li.onclick = (ev) => {
+      // si clic en botones, no centrar
+      if(ev.target === bEdit || ev.target === bDel) return;
+      map.panTo([p.lat, p.lng]);
+    };
+
+    posList.appendChild(li);
   }
-  // threshold ~25 meters (tunable)
-  if (best.idx >= 0 && best.d < 25) {
-    snapshot();
-    lines.splice(best.idx, 1);
-    save();
-    renderAll();
+}
+
+/************************
+ * AEROPUERTO (LÍNEAS POR PUNTOS)
+ ************************/
+function clearAirportLinesLayers(){
+  for(const l of airportLineLayers) map.removeLayer(l);
+  airportLineLayers = [];
+  if(currentAptLine){
+    map.removeLayer(currentAptLine);
+    currentAptLine = null;
+  }
+}
+
+function drawAirportLines(){
+  clearAirportLinesLayers();
+  for(const ln of lines){
+    const poly = L.polyline(ln.points, {color: ln.color, weight: ln.width, opacity: 0.95}).addTo(map);
+    airportLineLayers.push(poly);
+  }
+}
+
+function startOrAddAirportPoint(latlng){
+  if(!currentAptLine){
+    currentAptLine = L.polyline([latlng], {
+      color: lineColor.value || "#ffffff",
+      weight: +lineWidth.value || 3,
+      opacity: 0.95
+    }).addTo(map);
   } else {
-    alert("No encontré una línea cerca para borrar (hacé click más cerca).");
+    currentAptLine.addLatLng(latlng);
   }
 }
 
-// ====== SYNC EXCEL ======
-async function syncFromExcel() {
-  if (SCRIPT_URL.includes("PEGAR_")) {
-    return alert("Pegá la URL del Apps Script en js/app.js (SCRIPT_URL).");
+function finishAirportLine(){
+  if(!currentAptLine) return;
+  const pts = currentAptLine.getLatLngs().map(ll => [ll.lat, ll.lng]);
+  if(pts.length >= 2){
+    lines.push({
+      points: pts,
+      color: lineColor.value || "#ffffff",
+      width: +lineWidth.value || 3
+    });
+    saveJSON("eze_airport_lines", lines);
   }
-  try {
-    const res = await fetch(SCRIPT_URL, { cache: "no-store" });
-    const rows = await res.json();
+  map.removeLayer(currentAptLine);
+  currentAptLine = null;
+  drawAirportLines();
+}
 
-    // rows: [{matricula, posicion, vuelo, origen, tipo?}]
-    let changed = false;
+btnFinishLine.onclick = () => finishAirportLine();
 
-    for (const r of rows) {
-      const reg = String(r.matricula || "").trim();
-      const pos = String(r.posicion || "").trim();
-      if (!reg || !pos) continue;
-
-      const stand = findStandByName(pos);
-      if (!stand) continue; // stand not defined in editor
-
-      const existing = findPlaneByReg(reg);
-      const type = (r.tipo && TYPE_SIZE[r.tipo]) ? r.tipo : (existing?.type || stand.typeHint || "B737");
-
-      // rule: one stand = one plane (if stand already occupied, replace occupant with this reg)
-      const occupantIdx = planes.findIndex(p => p.standId === stand.id && String(p.reg).toUpperCase() !== reg.toUpperCase());
-      if (occupantIdx >= 0) {
-        planes.splice(occupantIdx, 1);
-        changed = true;
-      }
-
-      if (existing) {
-        existing.standId = stand.id;
-        existing.type = type;
-        existing.flight = r.vuelo || existing.flight || "";
-        existing.origin = r.origen || existing.origin || "";
-        changed = true;
-      } else {
-        planes.push({
-          id: String(Date.now() + Math.random()),
-          reg,
-          type,
-          state: "ARR",
-          standId: stand.id,
-          flight: r.vuelo || "",
-          origin: r.origen || ""
-        });
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      save();
-      renderAll();
+btnUndo.onclick = () => {
+  // si hay línea en progreso: sacar último punto
+  if(currentAptLine){
+    const pts = currentAptLine.getLatLngs();
+    if(pts.length > 1){
+      pts.pop();
+      currentAptLine.setLatLngs(pts);
+      return;
     } else {
-      alert("No hubo cambios (revisá que existan las posiciones en el plano).");
+      map.removeLayer(currentAptLine);
+      currentAptLine = null;
+      return;
     }
-  } catch (err) {
-    console.error(err);
-    alert("Error al sincronizar. Revisá la URL del Apps Script y permisos.");
+  }
+  // si no: borrar última línea guardada
+  if(lines.length){
+    lines.pop();
+    saveJSON("eze_airport_lines", lines);
+    drawAirportLines();
+  }
+};
+
+btnClearLines.onclick = () => {
+  if(!confirm("Borrar TODAS las líneas del aeropuerto?")) return;
+  lines = [];
+  saveJSON("eze_airport_lines", lines);
+  drawAirportLines();
+};
+
+lineColor.oninput = () => {
+  if(currentAptLine){
+    currentAptLine.setStyle({color: lineColor.value});
+  }
+};
+lineWidth.oninput = () => {
+  if(currentAptLine){
+    currentAptLine.setStyle({weight: +lineWidth.value});
+  }
+};
+
+/************************
+ * CLICK EN MAPA SEGÚN MODO
+ ************************/
+map.on("click", (e) => {
+  if(!isEditor) return;
+
+  if(editorMode === "pos"){
+    openNewPos(e.latlng);
+    return;
+  }
+  if(editorMode === "apt"){
+    startOrAddAirportPoint(e.latlng);
+    return;
+  }
+  // si no seleccionó modo, no hace nada
+});
+
+/************************
+ * EXCEL -> PANEL + AVIONES
+ ************************/
+btnRefresh.onclick = () => loadFlightsAndPlaceAircraft();
+
+function setFlightListError(msg){
+  flightList.innerHTML = "";
+  const li = document.createElement("li");
+  li.textContent = msg;
+  flightList.appendChild(li);
+
+    li.style.cursor = "pointer";
+    li.onclick = () => {
+      const stand = positions.find(p => p.name === posName);
+      if(stand){
+        map.setView([stand.lat, stand.lng], Math.max(map.getZoom(), 18), {animate:true});
+      }
+    };
+
+}
+
+async function loadFlightsAndPlaceAircraft(){
+  // panel siempre se actualiza
+  flightList.innerHTML = "";
+
+  // limpiar aviones anteriores
+  clearAircraft();
+
+  // si no hay API URL pegada, no rompas la app
+  if(!API_URL || API_URL.includes("PEGAR_AQUI")){
+    setFlightListError("Pegá la URL del Apps Script en js/app.js (API_URL).");
+    return;
+  }
+
+  let vuelos;
+  try{
+    const res = await fetch(API_URL, { cache: "no-store" });
+    vuelos = await res.json();
+    if(!Array.isArray(vuelos)) throw new Error("Respuesta no válida");
+  }catch(err){
+    setFlightListError("Error leyendo Excel (Apps Script). Revisá la URL y permisos.");
+    return;
+  }
+
+  // listar + colocar
+  for(const v of vuelos){
+    const vuelo = String(v.vuelo || "").trim();
+    const matricula = String(v.matricula || "").trim();
+    const origen = String(v.origen || "").trim();
+    const posName = normPosName(v.posicion);
+
+    const li = document.createElement("li");
+    li.textContent = `${vuelo || "-"} · ${matricula || "-"} · ${origen || "-"} · ${posName || "-"}`;
+    flightList.appendChild(li);
+
+    li.style.cursor = "pointer";
+    li.onclick = () => {
+      const stand = positions.find(p => p.name === posName);
+      if(stand){
+        map.setView([stand.lat, stand.lng], Math.max(map.getZoom(), 18), {animate:true});
+      }
+    };
+
+
+    if(!posName) continue;
+
+    const stand = positions.find(p => p.name === posName);
+    if(!stand) continue; // no existe posición creada
+
+    // crear avión sobre el punto
+    placeAircraftOnStand({ vuelo, matricula, origen, posName }, stand);
+  }
+
+  // actualizar labels por si cambia zoom
+  syncAllDynamicLabels();
+}
+
+function clearAircraft(){
+  for(const l of aircraftLayers) map.removeLayer(l);
+  aircraftLayers = [];
+  aircraftObjs = [];
+
+  // devolver estilo de stands (ocupado/libre)
+  for(const p of positions){
+    const layer = standLayersById.get(p.id);
+    if(layer){
+      layer.circle.setStyle({color: p.color || "#FFD100"});
+    }
   }
 }
 
-// ====== EVENTS ======
-btnEnterEditor.onclick = enterEditor;
-btnExitEditor.onclick = exitEditor;
-btnLoadPos.onclick = startLoadPositions;
-btnEditAirport.onclick = startEditAirport;
-btnUndo.onclick = undo;
-btnSync.onclick = syncFromExcel;
+// offsets de etiqueta de avión (más separada)
+function aircraftLabelOffsetFor(labelPosValue){
+  switch(labelPosValue){
+    case "front": return [26, -38];
+    case "back":  return [-60, 28];
+    case "left":  return [-90, -8];
+    case "right": return [34, -8];
+    default: return [34, -8];
+  }
+}
 
-btnDrawLine.onclick = () => setAirportTool("airportDraw");
-btnEraseLine.onclick = () => setAirportTool("airportErase");
+function placeAircraftOnStand(v, stand){
+  // detectar si hay otros aviones muy cerca
+  let nearby = aircraftObjs.filter(a=>{
+    const p = positions.find(x=>x.id===a.posId);
+    return p && distMeters({lat:stand.lat,lng:stand.lng},{lat:p.lat,lng:p.lng}) < 40;
+  }).length;
 
-map.on("click", (e) => {
-  if (!editorMode) return;
+  // offset automático si hay más de uno
+  const autoOffset = nearby * 20;
 
-  if (actionMode === "loadPos") {
-    showCreateStandModal(e.latlng);
-    return;
+  // marcar stand ocupado (gris)
+  const sLayer = standLayersById.get(stand.id);
+  if(sLayer){
+    sLayer.circle.setStyle({color: "#b0b0b0"});
   }
 
-  if (actionMode === "airportDraw") {
-    if (!drawing) beginLine(e.latlng);
-    else addPoint(e.latlng);
-    return;
-  }
+  // marcador avión (emoji) sobre el punto, rotado por HDG del stand
+  const deg = (+stand.hdg || 0);
+  
+  const size = aircraftSizeByModel(v.matricula, v.vuelo);
+  const html = `<div class="aircraft-icon" style="font-size:${size}px; transform: rotate(${deg}deg); color:#ff8c00;">✈️</div>`;
 
-  if (actionMode === "airportErase") {
-    eraseNearestLine(e.latlng);
-    return;
-  }
-});
 
-map.on("dblclick", (e) => {
-  if (!editorMode) return;
-  if (actionMode === "airportDraw") {
-    finishLine();
-  }
-});
+  const marker = L.marker([stand.lat, stand.lng], {
+    interactive: false,
+    icon: L.divIcon({
+      className: "",
+      html
+    })
+  }).addTo(map);
 
-// initial UI state: Operativo
-editorOverlay.hidden = true;
-opsPanel.hidden = false;
-editorPanel.hidden = true;
-modePill.textContent = "Modo Operativo";
-modePill.classList.remove("warn");
+  aircraftLayers.push(marker);
 
-renderAll();
+  // etiqueta (no rota) al costado
+  const labelPosValue = "right"; // fijo por ahora, luego lo hacemos arrastrable
+  const [ox, oy] = aircraftLabelOffsetFor(labelPosValue);
+  const oy2 = oy + autoOffset;
+  const ll = pointOffsetToLatLng([stand.lat, stand.lng], ox, oy2);
+  const labelHtml = `<div class="aircraft-label">${escapeHtml(v.matricula || "-")}<br>${escapeHtml(v.origen || "-")}</div>`;
+
+  const labelMarker = L.marker(ll, {
+    interactive: false,
+    icon: L.divIcon({
+      className: "",
+      html: labelHtml
+    })
+  }).addTo(map);
+
+  aircraftLayers.push(labelMarker);
+  aircraftObjs.push({posId: stand.id, marker, labelMarker, labelPos: labelPosValue});
+
+  // permitir drag del label
+  labelMarker.on("mousedown", (ev)=>{
+    ev.originalEvent.preventDefault();
+    map.dragging.disable();
+
+    const startPt = map.latLngToLayerPoint(labelMarker.getLatLng());
+    const startMouse = ev.originalEvent;
+
+    function onMove(e){
+      const dx = e.clientX - startMouse.clientX;
+      const dy = e.clientY - startMouse.clientY;
+      const newPt = L.point(startPt.x + dx, startPt.y + dy);
+      labelMarker.setLatLng(map.layerPointToLatLng(newPt));
+    }
+    function onUp(){
+      map.dragging.enable();
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+
+}
+
+
+function aircraftSizeByModel(matricula, vuelo){
+  // Heurística simple (se puede refinar luego)
+  // Widebody
+  if(/A330|A350|B77|B78|B74|B76/.test(vuelo)) return 36;
+  // Narrowbody
+  if(/A32|B73/.test(vuelo)) return 28;
+  // Regional
+  if(/E19|CRJ|AT7|DH8/.test(vuelo)) return 22;
+  return 26;
+}
+
+/************************
+ * INIT
+ ************************/
+drawAirportLines();
+drawAllStands();
+renderPosSidebar();
+loadFlightsAndPlaceAircraft();

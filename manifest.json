@@ -1,9 +1,0 @@
-{
-  "name": "EZE Plataforma OPS",
-  "short_name": "EZE OPS",
-  "start_url": "./index.html",
-  "display": "standalone",
-  "background_color": "#0b0f14",
-  "theme_color": "#FFD100",
-  "icons": []
-}
